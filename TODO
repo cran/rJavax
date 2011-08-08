@@ -1,0 +1,2175 @@
+# -*- org -*-
+* TODO Package errors
+  #+BEGIN_SRC R :tangle package-errors.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    library(rJavax)
+    setJavaRefClass('java.io.File')
+    
+  #+END_SRC
+* TODO =setJavaImplementation= using =setJavaRefClass=
+  #+BEGIN_SRC R :tangle set-java-implementation.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    source('ascend-class-hierarchy.R')
+    
+    dollarsToJava <- function(object, method)
+      toJava(do.call(`$`, list(object, method)))
+    
+    interfaceProxy <- function(interface, implementation)
+      new(J('RInterfaceProxy'),
+          interface,
+          toJava(dollarsToJava),
+          toJava(implementation))$newInstance()
+    
+    ##' Create a Java-proxy-interface-backed refClass.
+    ##' @param Class name of the Java interface to be implemented
+    ##' @param fields cf. \code{\link{ReferenceClasses}}
+    ##' @param contains cf. \code{\link{ReferenceClasses}}
+    ##' @param methods cf. cf. \code{\link{ReferenceClasses}}
+    ##' @param implements a character vector of Java interfaces implemented
+    ##' @param extends which Java base class is extended
+    ##' @param where the environment to define the javaRefClass in
+    ##' @return a Java-proxy-interface-backed refClass
+    ##' @include ascend-class-hierarchy.R
+    ##' @export
+    ##' @TODO we need to check that a method is provided for each interface method
+    setJavaImplementation <- function(Class,
+                                      fields = list(),
+                                      contains = character(),
+                                      methods = list(),
+                                      implements = character(),
+                                      extends = "java.lang.Object",
+                                      where = topenv(parent.frame()),
+                                      ...)
+    {
+      for (implement in implements)
+        setJavaRefClass(implement)
+    
+      if (!identical(extends, "java.lang.Object"))
+        stop("Currently, it is only possible to extend 'java.lang.Object'")
+    
+      implClassName <- paste(Class, "Impl", sep = "")
+      
+      delegateMethods <-
+        Map(function(method) method$getName(),
+            as.list(J('java.lang.Class')$forName(extends)$getDeclaredMethods()))
+    
+      delegateMethods <-
+        sapply(as.character(unlist(delegateMethods)), function(delegateMethod)
+               eval(substitute(function(...) {
+                 `$`(delegate, delegateMethod)(...)
+               }, list(delegateMethod=delegateMethod))))
+    
+      ## Some methods we need to override
+    
+      ## getClass
+      interfaces <- lapply(implements, J('java.lang.Class')$forName)
+      delegateMethods$getClass <- eval(substitute(function() {
+        J("java.lang.reflect.Proxy")$getProxyClass(loader, interfaces)
+      }, list(loader = interfaces[[1]]$getClassLoader(),
+              interfaces = .jarray(interfaces, "java.lang.Class"))))
+    
+      ## toString
+      delegateMethods$toString <- eval(substitute(function() {
+        paste("rJavax object of class '", name, "', implementing ",
+              paste("'", implements, "'", collapse = ", ", sep = ""), sep = "")
+      }, list(name = Class, implements = implements)))
+      
+      ## clone
+      delegateMethods$clone <- eval(substitute(function() {
+        interfaceProxy(implements, new(implClass))
+      }, list(implements = implements, implClassName)))
+    
+      initialize <- methods$initialize
+      methods$initialize <- NULL
+    
+      delegateMethods[names(methods)] <- methods
+    
+      fields$delegate <- "jobjRef"
+    
+      setRefClass(implClassName,
+                  contains = contains,
+                  fields = fields,
+                  methods = c(delegateMethods,
+                    initialize = eval(substitute(function(...) {
+                      delegate <<- new(J(extends))
+                      if (hasInitialize)
+                        initialize(...)
+                      else .self
+                    }, list(initialize = initialize,
+                            hasInitialize = !is.null(initialize),
+                            extends = extends)))
+                    ),
+                  where = where, ...)
+      
+      setRefClass(Class,
+                  contains = c(extends, implements),
+                  methods = list(
+                    initialize = eval(substitute(function(...) {
+                      ref <<- interfaceProxy(implements, new(implClass))
+                      .self
+                    }, list(implements = implements,
+                            implClass = implClassName)))),
+                  where = where, ...)
+    }
+    
+    Comparable <-
+      setJavaImplementation('Comparable',
+                            implements='java.lang.Comparable',
+                            methods=c(compareTo=function(object) as.integer(0)))
+    
+    OverriddenComparable <-
+      setJavaImplementation('OverriddenComparable',
+                            implements='java.lang.Comparable',
+                            methods=c(compareTo=function(object) as.integer(0),
+                              hashCode=function() as.integer(-1)))
+    
+    comparable <- Comparable$new()
+    comparable$compareTo(Object$new())
+    ## Wow: hashCode() and ref$hashCode() yield different results!
+    comparable$hashCode()
+    comparable$ref$hashCode()
+    
+    overriddenComparable <- OverriddenComparable$new()
+    overriddenComparable$hashCode()
+    ## overriddenComparable$ref$compareTo(Object$new())
+    
+  #+END_SRC
+* TODO use proper namespacing
+  =com/gene/rJavax=, etc.
+* TODO switch to ant instead of Makefiles
+  can even use [[http://cran.r-project.org/web/packages/ant/index.html][ant]] (but it's really just a wrapper around =system=).
+* DONE debug
+  CLOSED: [2011-05-25 Wed 12:23]
+  =.ArgsEnv=
+
+  [[http://cran.r-project.org/doc/manuals/R-ints.html#Argument-evaluation][Argument evaluation]]:
+
+  #+BEGIN_QUOTE
+  The essential difference5 between special and builtin functions is
+  that the arguments of specials are not evaluated before the C code
+  is called, and those of builtins are. Note that being a
+  special/builtin is separate from being primitive or .Internal: quote
+  is a special primitive, + is a builtin primitive, cbind is a special
+  .Internal and grep is a builtin .Internal.
+  #+END_QUOTE
+
+  [[http://cran.r-project.org/doc/manuals/R-ints.html#Dot_002ddot_002ddot-arguments][Dot-dot-dot arguments]]:
+
+  #+BEGIN_QUOTE
+  The formals of a function with a ... argument represent that as a
+  single argument like any other argument, with tag the symbol
+  R_DotsSymbol. When the actual arguments are matched to the formals,
+  the value of the ... argument is of SEXPTYPE DOTSXP, a pairlist of
+  promises (as used for matched arguments) but distinguished by the
+  SEXPTYPE.
+
+  Special primitives may need to handle ... arguments: see for example
+  the internal code of switch in file src/main/builtin.c.
+  #+END_QUOTE
+
+  [[https://svn.r-project.org/R/trunk/src/main/builtin.c][switch]]:
+
+  #+BEGIN_QUOTE
+  This is a SPECIALSXP, so arguments need to be evaluated as needed.
+  And (see names.c) X=2, so it defaults to a visible value.
+  #+END_QUOTE
+
+  [[https://svn.r-project.org/R/trunk/src/main/names.c][names]]:
+  
+  #+BEGIN_QUOTE
+  - c-entry :: The name of the corresponding C function, actually
+               declared in ../include/Internal.h .  Convention:
+    - all start with "do\_",
+ 	- all return SEXP.
+ 	- all have argument list
+ 			 (SEXP call, SEXP op, SEXP args, SEXP env) 
+  - eval ::	= XYZ (three digits) --- where e.g. '1' means '001'
+    - X=1 says that we should force R_Visible off
+    - X=0 says that we should force R_Visible on
+    - X=2 says that we should switch R_Visible on but let the C code
+      update this.
+    - Y=1 says that this is an internal function which must be
+      accessed with a .Internal(.) call, any other value is accessible
+      directly and printed in R as ".Primitive(..)".
+    - Z=1 says evaluate arguments before calling (BUILTINSXP) and
+    - Z=0 says don't evaluate (SPECIALSXP).
+  - arity :: How many arguments are required/allowed; "-1" meaning
+             ``any''
+  #+END_QUOTE
+
+  #+BEGIN_SRC R :tangle debug.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    dyn.load('debug.so')
+    a <- 2
+    ## {function(...) .External('debug', ...)}(a, 3)
+    ## {function(...) .Internal('debug')}(a, 3)
+    ## str(.Primitive('debug')(function() 2, 2, 3))
+    .External('debug', a, 2)
+    
+    debug <- function(expression) {
+      cat(substitute(expression), expression, "\n")
+    }
+    
+    a <- 2
+    debug(a)    
+  #+END_SRC
+
+  #+BEGIN_SRC c :tangle debug.c
+    #include <R.h>
+    #include <Rinternals.h>
+    #include <R_ext/Print.h>
+    #include <R_ext/Rdynload.h>
+    
+    SEXP debug(SEXP args) {
+      args = CDR(args);
+      Rprintf("%s", args);
+      return R_NilValue;
+    }
+    
+    static const R_ExternalMethodDef ExternEntries[] = {
+        {"debug", (DL_FUNC) &do_debug, -1},
+        {NULL, NULL, 0}
+    };
+    
+    void R_init_debug(DllInfo *info)
+    {
+      R_registerRoutines(info, NULL, NULL, NULL, ExternEntries);
+    }
+  #+END_SRC
+
+  #+BEGIN_SRC sh :tangle debug.sh :shebang #!/usr/bin/env bash
+    R CMD SHLIB debug.c
+  #+END_SRC
+
+  #+BEGIN_SRC R :tangle debug-in-R.R :shebang #!/usr/local/bin/R --vanilla --slave -f 
+    ## Thanks, William Dunlap!
+    ## <https://stat.ethz.ch/pipermail/r-devel/2011-May/061098.html>
+    debug <- function(...) {
+      promises <- as.list(substitute(list(...)))[-1]
+      str(structure(Map(eval, promises),
+                    names=Map(deparse, promises)))
+    }
+    
+    a <- 2
+    debug(a, a + a, (function() a + a)())
+  #+END_SRC
+* DONE ascending the class hierarchy
+  CLOSED: [2011-05-26 Thu 15:26]
+  - CLOSING NOTE [2011-05-26 Thu 15:26] \\
+    I'd like to get rid of Delegate, though, and have java.lang.Object be
+    the base case.
+  [[http://download.oracle.com/javase/6/docs/api/java/lang/Class.html#getDeclaredMethods()][getDeclaredMethods]]:
+
+  #+BEGIN_QUOTE
+  This includes public, protected, default (package) access, and
+  private methods, but excludes inherited methods.
+  #+END_QUOTE
+
+  The inherited vs. non-inherited thing is probably more fundamental
+  than [[declared-methods][publication]] (v. infra).
+
+  #+BEGIN_SRC R :tangle ascend-class-hierarchy.R :noweb yes :shebang #!/usr/local/bin/R --vanilla --slave -f
+    source('preamble.R')
+    
+    getJavaRefClass <- getRefClass
+    
+    ## Should we memoize this somewhere? Requires an expensive call into
+    ## Java.
+    hasMethod <- function(referent, method)
+      .jcall("RJavaTools",
+             "Z",
+             "hasMethod",
+             .jcast(referent, "java/lang/Object" ),
+             method)
+    
+    ##' Create a refClass-based proxy for Java classes.
+    ##' @param className the class to be proxied
+    ##' @param where environment to define the refClass in
+    ##' @return a refClass-based Java-class-proxy.
+    ##' @export
+    setJavaRefClass <- function(className,
+                                where=topenv(parent.frame()))
+      tryCatch(getJavaRefClass(className),
+               error=function(e) {
+                 class <- J('java.lang.Class')$forName(className)
+    
+                 superclass <- class$getSuperclass()
+                 superclassName <- NULL
+                 if (!is.null(superclass)) {
+                   superclassName <- superclass$getName()
+                   setJavaRefClass(superclassName, where)
+                 }
+                 
+                 interfaces <- Map(function(interface) interface$getName(),
+                                   as.list(class$getInterfaces()))
+    
+                 for (interface in interfaces)
+                   setJavaRefClass(interface, where)
+    
+                 ## sort the interfaces lexicographically to avoid inconsistencies
+                 contains <- c(superclassName,
+                               sort(as.character(unlist(interfaces))))
+    
+                 isAbstract <- function(class) {
+                   J('java.lang.reflect.Modifier')$isAbstract(class$getModifiers())
+                 }
+                 ## if an interface or an abstract class, need to contain VIRTUAL
+                 if (class$isInterface() || isAbstract(class))
+                   contains <- c(contains, "VIRTUAL")
+                 
+                 declaredMethods <-
+                   as.character(unlist(Map(function(method) method$getName(),
+                                           as.list(class$getDeclaredMethods()))))
+                 
+                 methods <- sapply(declaredMethods, function(method) {
+                   eval(substitute(function(...) {
+                     arguments <- base::Map(function(argument) {
+                       if (methods::is(argument, 'java.lang.Object')) {
+                         argument$ref
+                       } else
+                       argument
+                     }, base::list(...))
+                     
+                     ##
+                     ## java.lang.Object will not have
+                     ## e.g. finalize() under certain
+                     ## conditions (namely,
+                     ## superclass-initialization when
+                     ## creating a generator object).
+                     ##
+                     ## I notice that finalize() is called
+                     ## twice; could it be calling
+                     ## finalize() on a methodless zombie?
+                     ##
+                     ##debug(.self, .self$ref, method, arguments, call.stack=FALSE)
+                     if (hasMethod(.self$ref, method))
+                       do.call(.jrcall, c(.self$ref, method, arguments))
+                   }, list(method=method)))
+                 })
+    
+                 if (className == "java.lang.Object")
+                   setRefClass("java.lang.Object",
+                               fields = list(ref = 'jobjRef'),
+                               methods = c(methods,
+                                 initialize = function(...) {
+                                   ref <<- new(J(class(.self)), ...)
+                                   .self
+                                 },
+                                 copy = function(shallow = FALSE) {
+                                   ## unlike clone(), this preserves any
+                                   ## fields that may be present in
+                                   ## an R-specific subclass
+                                   x <- callSuper(shallow)
+                                   x$ref <- ref$clone()
+                                   x
+                                 }),
+                               contains = contains,
+                               where = where)
+                 else setRefClass(className,
+                                  methods = methods,
+                                  contains = contains,
+                                  where = where)
+               })
+    
+    File <- setJavaRefClass('java.io.File')
+    ## Calling a Java method (the File-constructor) with a native R type
+    ## (character):
+    stopifnot(File$new('/tmp')$getPath() == '/tmp')
+    
+    ## java.lang.Object is automagically defined as the parent of
+    ## java.io.file.
+    Object <- getJavaRefClass('java.lang.Object')
+    o1 <- Object$new()
+    o2 <- Object$new()
+    ## Calling a Java method with a javaRefClass (extraction of the ref
+    ## happens behind-the-scenes):
+    stopifnot(o1$equals(o1))
+    stopifnot(!o1$equals(o2))
+    
+  #+END_SRC
+* DONE we appear to be doing something fundamentally wrong with refClasses
+  CLOSED: [2011-05-23 Mon 17:07]
+  - CLOSING NOTE [2011-05-23 Mon 17:07] \\
+    Yeah, let's name-mangle.
+  in ~setJavaInterfaceImplementation~: 'jobjInterfaceRef' becomes part
+  of the package/global namespace, doesn't it? Shouldn't we therefore
+  name it after the implementation/interface?
+
+  Take care, then, because we're polluting the namespace with
+  dynamically generated refClass-names.
+
+  Should we add a ~where~ to ~setJavaInterfaceImplementation~ that
+  defaults to something suitable?
+* DONE integration of proxy-object with package
+  CLOSED: [2011-05-11 Wed 14:04]
+  Of course: we can't integrate it statically, because we have to
+  instantiate a reference object! Damn.
+
+  #+BEGIN_SRC R :tangle integrate-proxy-object.R :noweb yes :shebang #!/usr/local/bin/R --vanilla --slave -f
+    <<preamble>>
+    
+    proxyMethods <- function(class) {
+      method.names <- unique(Map(function(method) method$getName(),
+                                 as.list(J('java.lang.Class')
+                                         $forName(class)
+                                         $getMethods())))
+    
+      proxyObject <- new(J(class)) 
+    
+      structure(Map(function(method.name)
+                    ## Have to force evaluation because `method.name'
+                    ## and `proxyObject' aren't defined from the
+                    ## refClass.
+                    eval(substitute(function(...) {
+                      .jrcall(proxyObject, method.name, ...)
+                    },
+                                    list(method.name=method.name,
+                                         proxyObject=proxyObject))),
+                    method.names),
+                names=method.names)
+    }
+    
+    ##' Implement the Java-\code{interface} with a \code{refClass}-based
+    ##' \code{implementation}.
+    ##' @param interface the name of the to-be-implemented Java interface
+    ##' @param implementation an instance of the implementing \code{refClass}
+    ##' @return a \code{refClass} implementing the Java \code{interface}
+    ##' @note \code{implementation} takes an instance of the
+    ##' \code{refClass}, not the \code{refClass} itself; allowing one to
+    ##' make use of peculiar initializers.
+    ##' @export
+    setJavaInterfaceImplementation <- function(interface,
+                                               implementation,
+                                               base='java.lang.Object') {
+      ## Should we use a class-name based on the implementation/interface?
+      setRefClass('jobjInterfaceRef',
+                  contains=c(implementation@.xData$.refClassDef@className),
+                  fields='proxy',
+                  methods=c(eval(substitute(proxyMethods(base),
+                    list(base=base))),
+                    initialize=eval(substitute(function() {
+                      proxy <<-
+                        interfaceProxy(interface, implementation)
+                      .self
+                    }),
+                      list(interface=interface,
+                           implementation=implementation))),
+                  ## Running into "cannot add bindings to a locked
+                  ## environment" without this; is something fundamentally
+                  ## wrong with our approach?
+                  ##
+                  ## See TODO: we'll pollute the namespace with
+                  ## dynamically generated names based on e.g.
+                  where=topenv(parent.frame()))
+    }
+    
+    testInterfaceImplementation <-
+      setRefClass('testInterfaceImplementation',
+                  methods=list(salute=function(salutandum)
+                    sprintf('Salve, %s!', salutandum)))
+    
+    testInterface <-
+      setJavaInterfaceImplementation('TestInterfaceProxyInterface',
+                                     testInterfaceImplementation$new())
+    
+    stopifnot(typeof(testInterface$new()$hashCode()) == 'integer')
+    
+  #+END_SRC
+* DONE abstract proxy-object into a constructor
+  CLOSED: [2011-05-11 Wed 13:16]
+  - CLOSING NOTE [2011-05-11 Wed 13:16] \\
+    Between magically bound identifiers and ~substitute~, this is weird
+    shit.
+  #+BEGIN_SRC R :tangle proxy-object.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    library(rJava)
+    .jinit()
+    
+    proxyObject <- function(class) {
+      method.names <- unique(Map(function(method) method$getName(),
+                                 as.list(J('java.lang.Class')
+                                         $forName(class)
+                                         $getMethods())))
+    
+    
+      methods <-
+        structure(Map(function(method.name)
+                      ## Have to force evaluation because `method.name'
+                      ## isn't defined from the refClass.
+                      eval(substitute(function(...) {
+                        ## `deferendum' is magically bound within the
+                        ## refClass environment.
+                        .jrcall(deferendum, method.name, ...)
+                      },
+                                      list(method.name=method.name))),
+                      method.names),
+                  names=method.names)
+    
+      setRefClass('objectDeference',
+                  fields='deferendum',
+                  methods=c(methods,
+                    initialize=eval(substitute(function() {
+                      deferendum <<- eval(substitute(new(J(class)), list(class=class)))
+                      .self
+                    }),
+                      list(class=class))))
+    }
+    
+    stopifnot(typeof(proxyObject('java.lang.Object')$new()$hashCode()) ==
+              'integer')
+    
+  #+END_SRC
+* DONE get methods for a java class
+  CLOSED: [2011-05-11 Wed 13:16]
+  [[http://tutorials.jenkov.com/java-reflection/private-fields-and-methods.html][The difference]] between ~getMethods()~ and ~getDeclaredMethods()~:
+
+# <<declared-methods>>
+  #+BEGIN_QUOTE
+  To access a private field you will need to call the
+  ~Class.getDeclaredField(String name)~ or ~Class.getDeclaredFields()~
+  method. The methods ~Class.getField(String name)~ and
+  ~Class.getFields()~ methods only return public fields, so they won't
+  work.
+  #+END_QUOTE
+
+  Can apparently not access ~methods~ from within ~methods~:
+
+  #+BEGIN_SRC R :tangle methods-from-methods.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    setRefClass('methodsFromMethods',
+                methods=list(a=function() {},
+                  initialize=function() {
+                    str(methods)
+                    cat(ls(.self@.xData))
+                    .self
+                  }))$new()    
+  #+END_SRC
+
+  That's ok, though: we have an implementing refClass that we're
+  passing in. Should we create a proxy refClass from Object that we
+  also inherit from, allowing its methods to be over-shadowed by the
+  implementing refClass?
+
+  First contained class takes precedence w.r.t. method-shadowing:
+
+  #+BEGIN_SRC R :tangle refclass-shadow.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    setRefClass('a',
+                methods=list(a=function() 1))
+    
+    setRefClass('b',
+                methods=list(a=function() 2))
+    
+    stopifnot(setRefClass('c',
+                          contains=c('a', 'b'))$new()$a() == 1)
+    
+    stopifnot(setRefClass('d',
+                          contains=c('b', 'a'))$new()$a() == 2)
+  #+END_SRC
+
+  This, for instance, does not work:
+
+  #+BEGIN_SRC R :tangle add-dynamic-methods.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    setRefClass('a',
+                methods=list(initialize=function() {
+                  unlockBinding('methods', parent.frame())
+                  methods <<- list(a=function() 1)
+                  .self
+                }))$new()$a()
+    
+  #+END_SRC
+
+  We need another mechanism: ~substitute~ to the rescue?
+
+  #+BEGIN_SRC R :tangle substitute-dynamic-methods.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    stopifnot(eval(substitute(setRefClass('a', methods=methodList),
+                              list(methodList=list(a=function() 2))))$new()$a()
+              == 2)
+    
+    stopifnot((function(methodList)
+               setRefClass('b', methods=methodList))(list(a=function()
+                                  2))$new()$a()
+              == 2)    
+  #+END_SRC
+
+  #+BEGIN_SRC R :tangle defer-to-proxy-object.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    library(rJava)
+    .jinit()
+    
+    method.names <- unique(Map(function(method) method$getName(),
+                               as.list(J('java.lang.Class')
+                                       $forName('java.lang.Object')
+                                       $getMethods())))
+    
+    proxyObject = new(J('java.lang.Object'))
+    
+    methods <-
+      structure(Map(function(method.name)
+                    ## Have to force evaluation because `method.name'
+                    ## isn't defined from the refClass.
+                    eval(substitute(function(...) {
+                      .jrcall(proxyObject, method.name, ...)
+                    },
+                                    list(method.name=method.name))),
+                    method.names),
+                names=method.names)
+    
+    stopifnot(methods$hashCode() ==
+              setRefClass('objectDeference',
+                          fields='deferendum',
+                          methods=methods)$new()$hashCode())
+  #+END_SRC
+* DONE introspect Object
+  CLOSED: [2011-05-11 Wed 10:22]
+  #+BEGIN_SRC R :tangle introspect-object.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    library(rJava)
+    .jinit()
+    
+    stopifnot(unique(Map(function(method) method$getName(),
+                         as.list(J('java.lang.Class')
+                                 $forName('java.lang.Object')
+                                 $getMethods()))) ==
+              c("hashCode",
+                "getClass",
+                "wait",
+                "equals",
+                "notify",
+                "notifyAll",
+                "toString"))
+  #+END_SRC
+* DONE =setJavaInterfaceImplementation= with dollars
+  CLOSED: [2011-05-10 Tue 22:50]
+  #+BEGIN_SRC R :tangle test-interface.R :noweb yes :shebang #!/usr/local/bin/R --vanilla --slave -f
+    <<preamble>>
+    
+    dollarsToJava <- function(refClass, method)
+      toJava(do.call(`$`, list(refClass, method)))
+    
+    testInterfaceProxy <- function(interface, implementation)
+      new(J('TestInterfaceProxy'),
+          interface,
+          toJava(dollarsToJava),
+          toJava(implementation))$newInstance()
+    
+    setJavaInterfaceImplementation <- function(interface,
+                                               implementation)
+      setRefClass('jobjInterfaceRef',
+                  contains=implementation@.xData$.refClassDef@className,
+                  fields='proxy',
+                  methods=list(initialize=eval(substitute(function() {
+                    proxy <<-
+                      testInterfaceProxy(interface, implementation)
+                    .self
+                  }),
+                                 list(interface=interface,
+                                      implementation=implementation))))
+    
+    testInterfaceImplementation <-
+      setRefClass('testInterfaceImplementation',
+                  methods=list(salute=function(salutandum)
+                    sprintf('Salve, %s!', salutandum)))
+    
+    testInterface <-
+      setJavaInterfaceImplementation('TestInterfaceProxyInterface',
+                                     testInterfaceImplementation$new())
+    
+    ti <- testInterface$new()
+    
+    stopifnot(ti$salute('terra') == ti$proxy$salute('terra'))
+    
+  #+END_SRC
+  
+  #+BEGIN_SRC java :tangle src/TestInterfaceProxy.java
+    import java.lang.reflect.InvocationHandler;
+    import java.lang.reflect.Method;
+    import java.lang.reflect.Proxy;
+    import java.util.ArrayList;
+    import java.util.HashMap;
+    import java.util.Map;
+    import java.util.Set;
+    
+    import org.rosuda.REngine.RList;
+    import org.rosuda.REngine.REngine;
+    import org.rosuda.REngine.REXP;
+    import org.rosuda.REngine.REXPDouble;
+    import org.rosuda.REngine.REXPInteger;
+    import org.rosuda.REngine.REXPFactor;
+    import org.rosuda.REngine.REXPLanguage;
+    import org.rosuda.REngine.REXPList;
+    import org.rosuda.REngine.REXPRaw;
+    import org.rosuda.REngine.REXPReference;
+    import org.rosuda.REngine.REXPString;
+    import org.rosuda.REngine.REXPWrapper;
+    import org.rosuda.REngine.REXPJavaReference;
+    import org.rosuda.REngine.JRI.JRIEngine;
+    
+    public class TestInterfaceProxy {
+        String interfaceName;
+        REXPReference dollars;
+        REXPReference refClass;
+        InvocationHandler handler;
+        static HashMap<Class, Method> translators;
+    
+        public TestInterfaceProxy(String interfaceName,
+                                  REXPReference dollars,
+                                  REXPReference refClass) {
+            this.interfaceName = interfaceName;
+            this.dollars = dollars;
+            this.refClass = refClass;
+            this.handler = makeInvocationHandler();
+        }
+    
+        static {
+            try {
+                translators =
+                    new HashMap<Class, Method>() {
+                    {
+                        put(REXPString.class,
+                            REXPString.class.getMethod("asString"));
+                        put(REXPRaw.class,
+                            REXPRaw.class.getMethod("asBytes"));
+                        put(REXPDouble.class,
+                            REXPDouble.class.getMethod("asDouble"));
+                        put(REXPFactor.class,
+                            REXPFactor.class.getMethod("asFactor"));
+                        put(REXPInteger.class,
+                            REXPInteger.class.getMethod("asInteger"));
+                        put(REXPList.class,
+                            REXPList.class.getMethod("asList"));                    
+                    }
+                };
+            } catch (Throwable e) {
+                e.printStackTrace();
+            }
+        }
+    
+        public InvocationHandler makeInvocationHandler() {
+            return new InvocationHandler() {
+                public Object invoke(Object proxy,
+                                     Method method,
+                                     final Object[] args) {
+                    try {
+                        final REXPReference refClassMethod = (REXPReference)
+                            ((REXPJavaReference)
+                             ((REXPReference) dollars).getEngine()
+                             .eval(new REXPLanguage
+                                   (new RList(new REXP[] {
+                                           dollars,
+                                           refClass,
+                                           new REXPString(method.getName())
+                                       })),
+                                   null,
+                                   true))
+                            .getObject();
+    
+                        ArrayList<REXP> call = new ArrayList<REXP>() {
+                            {
+                                add(refClassMethod);
+                                if (args != null) {
+                                    for (Object arg: args) {
+                                        REXP wrappedArg = REXPWrapper.wrap(arg);
+                                        if (wrappedArg != null)
+                                            add(wrappedArg);
+                                        else
+                                            // Last-ditched attempt to add
+                                            // a non-scalar
+                                            add(new REXPJavaReference(arg));
+                                    }
+                                }
+                            }
+                        };
+    
+                        REXP value = refClassMethod.getEngine()
+                            .eval(new REXPLanguage
+                                  (new RList(
+                                             call.toArray(new REXP[0])
+                                             // new REXP[] { refClassMethod }
+                                             )),
+                                  null,
+                                  true);
+    
+                        if (value instanceof REXPJavaReference)
+                            return ((REXPJavaReference) value).getObject();
+                        else {
+                            Method translator = TestInterfaceProxy.translators
+                                .get(value.getClass());
+                            if (translator != null)
+                                return translator.invoke(value);
+                            else
+                                return null;
+                        }
+                    } catch (Throwable e) {
+                        e.printStackTrace();
+                    }
+                    return null;
+                }
+            };
+        }
+    
+        public Object newInstance() {
+            try {
+                Class interfaceClass = Class.forName(interfaceName);
+                return Proxy.newProxyInstance(interfaceClass.getClassLoader(),
+                                              new Class[] { interfaceClass },
+                                              handler);
+            } catch (Throwable e) {
+                e.printStackTrace();
+            }
+    
+            return null;
+        }
+    }
+    
+  #+END_SRC
+
+  #+BEGIN_SRC java :tangle src/TestInterfaceProxyInterface.java
+    public interface TestInterfaceProxyInterface {
+        public String salute(String salutandum);
+    }
+    
+  #+END_SRC
+
+  #+BEGIN_SRC makefile :tangle test-interface.mk :shebang #!/usr/bin/unexpand -t 4
+    all:
+        $(MAKE) -C src all TestInterfaceProxy.class && \
+        ./test-interface.R
+    
+  #+END_SRC
+* DONE dollars
+  CLOSED: [2011-05-10 Tue 21:47]
+  signature: ~RInterfaceProxy(String interfaceName, REXPReference
+  refClass, REXPReference dollars)~; in ~invoke(Object proxy, Method
+  method, final Object[] args)~, ~method.getName()~ takes the place of
+  ~String method~ in ~TestCallableReturn.test~.
+
+  ~setJavaInterfaceImplemntation(interface, implementation)~ (using
+  ~substitute~); when instantiating ~RInterfaceProxy~, it uses
+  ~dollarsToJava~. is there any way we can pull ~dollarsToJava~ out of
+  the package/environment?
+
+  it's merely convenient, of course, to pass it in; can we justify it
+  by abstracting the accessor? don't think so.
+* DONE =setJavaInterfaceImplementation=
+  CLOSED: [2011-05-10 Tue 21:47]
+  - CLOSING NOTE [2011-05-10 Tue 21:47] \\
+    Pre-dollars
+# <<setJavaInterfaceImplementation>>
+  because of the limitations of closures and refclasses, have to
+  repeat the implementation in both =setJII= *and* the constructor;
+  for other opaque reasons, cannot both subclass =jobjRef= and specify
+  an initializer.
+  
+  use michael's idea of [[substitute][substitute on the function definition]].
+
+  bad news, btw: =.self= and =callSuper= don't exist when calling from
+  java.
+
+  #+BEGIN_SRC R :noweb yes :tangle test-short-circuit.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    options(morePaths='tests')
+    
+    library(rJavax)
+    
+    setJavaInterfaceImplementation <- function(implementation)
+      setRefClass('jobjInterfaceRef',
+                  contains=implementation$className,
+                  fields='proxy',
+                  methods=list(initialize=function(interface,
+                                 implementation,
+                                 ...) {
+                    implementations <-
+                      structure(Map(function(name) {
+                        get(name, implementation$def@refMethods)
+                      },
+                                    implementation$methods()),
+                                names=implementation$methods())
+                    proxy <<-
+                      interfaceProxy(interface, implementations)
+                    .self
+                  }))
+    
+    testInterfaceImplementation <-
+      setRefClass('testInterfaceImplementation',
+                  methods=list(mogrify=function(string)
+                    paste(string, 'mogrified', sep='-'),
+                    tetradicSum=function(w, x, y, z)
+                    sum(w, x, y, z),
+                    multiplyInts=function(x, y)
+                    as.integer(x * y)))
+    
+    testInterface <-
+      setJavaInterfaceImplementation(testInterfaceImplementation)
+    
+    ti <- testInterface$new('TestInterface',
+                            testInterfaceImplementation)
+    
+    stopifnot(ti$mogrify('test') == ti$proxy$mogrify('test'))
+    
+  #+END_SRC  
+
+  example of =RcreateObject= on =RInterfaceProxy=:
+
+  #+BEGIN_SRC R
+    new('jobjRef',
+        jobj=.External('RcreateObject',
+          'RInterfaceProxy',
+          'TestInterface',
+          to.hashmap(list(mogrify=function(string)
+                          paste(string, 'mogrified', sep='-'),
+                          tetradicSum=function(w, x, y, z)
+                          sum(w, x, y, z),
+                          multiplyInts=function(x, y)
+                          as.integer(x * y)))),
+        jclass='RInterfaceProxy')$newInstance()$tetradicSum(1, 2, 3, 4)
+  #+END_SRC
+* DONE call the result of an R function
+  CLOSED: [2011-05-04 Wed 03:00]
+  - CLOSING NOTE [2011-05-04 Wed 03:00] \\
+    Done even for the reference class case
+  #+BEGIN_SRC java :tangle src/TestCallableReturn.java
+    import org.rosuda.REngine.RList;
+    import org.rosuda.REngine.REngine;
+    import org.rosuda.REngine.REXP;
+    import org.rosuda.REngine.REXPEnvironment;
+    import org.rosuda.REngine.REXPLanguage;
+    import org.rosuda.REngine.REXPReference;
+    import org.rosuda.REngine.REXPString;
+    import org.rosuda.REngine.REXPUnknown;
+    import org.rosuda.REngine.REXPJavaReference;
+    
+    public class TestCallableReturn {
+        public static void test(REXPReference dollars,
+                                REXPReference refClass,
+                                String method) {
+            try {
+                // We can also get at the method followingly; but we run
+                // into the problem that it is not a REXPReference and
+                // therefore cannot, apparently, be evaluated:
+                // 
+                // System.out.println(((REXPEnvironment) refClass.getAttribute(".xData"))
+                //                    .get("test"));
+    
+                REXPReference refClassMethod = (REXPReference)
+                    ((REXPJavaReference)
+                     ((REXPReference) dollars).getEngine()
+                     .eval(new REXPLanguage
+                           (new RList(new REXP[] { dollars,
+                                                   refClass,
+                                                   new REXPString(method) })),
+                           null,
+                           true))
+                    .getObject();
+    
+                REXP value = refClassMethod.getEngine()
+                    .eval(new REXPLanguage
+                          (new RList(new REXP[] { refClassMethod })),
+                          null,
+                          true);
+    
+                // Would be nice if we could actually extract callable
+                // methods this way.
+                assert ((REXPUnknown)
+                        ((REXPEnvironment)
+                         value.getAttribute(".xData")).get("test")).getType()
+                    == 3;
+            } catch (Throwable e) {
+                e.printStackTrace();
+            }
+        }
+    }
+    
+  #+END_SRC
+
+  #+BEGIN_SRC R :tangle test-callable-return.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    library(rJava)
+    
+    .jinit(classpath='inst/java/JRIEngine.jar:inst/java/JRI.jar:inst/java/REngine.jar:inst/java/rJavax.jar:src')
+    .jengine(TRUE)
+    
+    dollarsToJava <- function(refClass, method)
+      toJava(do.call(`$`, list(refClass, method)))
+    
+    testClass <- setRefClass('testClass',
+                             ## We can refer to .self even in Java!
+                             methods=list(test=function() .self))
+    
+    J('TestCallableReturn')$test(toJava(dollarsToJava),
+                                 toJava(testClass$new()),
+                                 'test')
+    
+  #+END_SRC
+
+  #+BEGIN_SRC makefile :tangle test-callable-return.mk :shebang #!/usr/bin/unexpand -t 4
+    all:
+        make -C src all TestCallableReturn.class &&
+        ./test-callable-return.R
+
+  #+END_SRC
+  
+  [[http://www.rforge.net/org/docs/org/rosuda/REngine/REXPEnvironment.html][REXPEnvironment]]s are like REXPReferences, btw; so we may not need to
+  ~toJava~ everything? Instead of calling ~$~, it looks like we may be
+  able to do ~REXPReference.get~. Oh: but we have that whole ~toJava~
+  business; should we override ~$~? But we want the short-circuit
+  case.
+
+  Also, reference classes don't appear to come back as environments;
+  but as lists instead (with ~.xData~, etc.). Nope; not ~RList~ nor
+  ~REXPList~, neither.
+
+  Well, regardless: we can reference ~.self~.
+* DONE =getObject=
+  CLOSED: [2011-05-04 Wed 03:00]
+  test ~value.getObject~ à la [[simons-letter][simon's letter]]; he must be referring to
+  [[http://www.rforge.net/org/docs/org/rosuda/REngine/REXPJavaReference.html][REXPJavaReference]], mustn't he: but how to get one?
+
+  i don't want to force people on the R-side to have to wrap their
+  values.
+
+  #+BEGIN_SRC java :tangle src/TestArbitraryObject.java
+    import java.util.Stack;
+    
+    public interface TestArbitraryObject {
+        public Stack stack(Stack stack);
+    }
+  #+END_SRC
+
+  should we abstract this ~.jinit~ prologue into a named block?
+
+  #+BEGIN_SRC R :tangle test-arbitrary-object.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    library(rJava)
+    source('R/interface.R')
+    
+    .jinit(classpath='inst/java/JRIEngine.jar:inst/java/JRI.jar:inst/java/REngine.jar:inst/java/rJavax.jar:src')
+    .jengine(TRUE)
+    
+    interface <-
+      interfaceProxy('TestArbitraryObject',
+                     list(stack=function(stack) stack,
+                          toString=function() 'TestArbitraryObject'))
+    
+    interface$stack(new(J('java/util/Stack')))
+    
+  #+END_SRC
+
+  #+BEGIN_SRC makefile :tangle test-arbitrary-object.mk :shebang #!/usr/bin/unexpand -t 4
+    all:
+        make -C src all TestArbitraryObject.class && ./test-arbitrary-object.R
+  #+END_SRC
+* DONE =ld.so.conf=
+  CLOSED: [2011-04-25 Mon 02:35]
+  i have to add at least these two directories (pointing to
+  ~libjvm.so~ and ~rJava.so~:
+
+  #+BEGIN_EXAMPLE
+  /usr/local/java/jre/lib/amd64/server/
+  /usr/local/lib64/R/library/rJava/libs
+  #+END_EXAMPLE
+* DONE =REXPJavaReference=
+  CLOSED: [2011-04-25 Mon 02:24]
+  - CLOSING NOTE [2011-04-25 Mon 02:25] \\
+    http://www.rforge.net/JRI/files/
+  all of our jars appear to be defective.
+  
+  #+BEGIN_SRC java :tangle src/TestREXPJavaReference.java
+    import org.rosuda.REngine.REXPJavaReference;
+    
+    public class TestREXPJavaReference {
+        public static void main(String[] argv) {
+        }
+    }
+    
+  #+END_SRC
+* DONE package preamble for testing
+  CLOSED: [2011-04-13 Wed 12:38]
+  #+srcname: preamble
+  #+BEGIN_SRC R :tangle preamble.R
+    library(rJava)
+    source('R/interface.R')
+    
+    .jinit(classpath=paste(c(Sys.glob('inst/java/*.jar'), 'src', 'tests'),
+             collapse=':'))
+    invisible(.jengine(TRUE))
+    
+    ## Note that these need to specified as e.g.
+    ## ‘options(error=utils::recover)’ in startup files such as
+    ## ‘.Rprofile’.
+    options(error=dump.frames)
+    
+    ## Thanks, William Dunlap!
+    ## <https://stat.ethz.ch/pipermail/r-devel/2011-May/061098.html>
+    ##
+    ## Have a parameter which specifies how deep to list the call stack,
+    ## negative or non-number (e.g. boolean) being the whole thing?
+    ## Chicken implements it followingly: n deletes the n most recent
+    ## entries; this defaults, currently, to 1 (avoid the actual call to
+    ## debug).
+    ##
+    ## Also: an environment inspecting tool (which default to identity)?
+    ##
+    ## Should we indent the subsequent lines of str to go after the arrow?
+    ## What about long/multiline expressions, though?
+    ##
+    ## Also: output and debug are interwoven; what about storing up the
+    ## debug and outputting it at the end? What about conditions?
+    ##
+    ## Should be able to pass some things to `str' when e.g. `str' elides
+    ## list elements.
+    ##
+    ## Need better condition-handling (just do the message and call
+    ## manually); take a look at the default condition-handling display.
+    debug <- function(...,
+                      environment=TRUE,
+                      call.stack=TRUE,
+                      where=parent.frame()) {
+      ## If we could get e.g. the calling function
+      ##
+      ## In other words, I'd like this to look like:
+      ## 
+      ## Context (function, environment, etc.)
+      ##   expression-0 -> value-0
+      ##     [value-0 continued ...]
+      ##   expression-1 -> value-1
+      ##     [value-1 continued ...]
+      ##   ...
+      ##   expression-n -> value-n
+      ##     [value-n continued ...]
+      if (environment)
+        cat(sprintf('%s\n', format(where)))
+      if (call.stack) {
+        calls <- as.list(eval(sys.calls(), envir=where))
+        cat.calls <- function(calls, depth=1) {
+          if (length(calls)) {
+            cat.calls(calls[-1], depth + 1)
+            cat(sprintf('%s: %s\n',
+                        depth,
+                        paste(deparse(calls[[1]]),
+                              collapse='\n  + ')))
+          }
+        }
+        cat.calls(calls[-length(calls)])
+      }
+      
+      promises <- as.list(substitute(list(...)))[-1]
+      expressions <- Map(deparse, promises)
+      values <- Map(function(promise)
+                    tryCatch(eval(promise, envir=where),
+                             error=function(e) e),
+                    promises)
+      cat.values <- function(expressions, values) {
+        if (length(expressions)) {
+          cat(sprintf('  %s -> %s',
+                      paste(expressions[[1]],
+                            collapse='\n  + '),
+                      paste(capture.output(str(values[[1]])),
+                            collapse='\n   ')),
+              '\n')
+          cat.values(expressions[-1],
+                     values[-1])
+        }
+      }
+      cat.values(expressions, values)
+    }
+    
+  #+END_SRC
+
+  #+BEGIN_SRC R :tangle debug-context.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    source('preamble.R')
+    
+    debug(2)
+    debug((function() {
+      'oeunhtuohnto
+    oentheunthoeutnh'
+    })())
+    
+    (function() {
+      debug(2)
+    })()
+    
+    f <- function() {
+      g <- function()
+        debug(2)
+    
+      g()
+    }
+    
+    f()
+    
+  #+END_SRC
+* DONE reference class inheriting from =jobjRef=
+  CLOSED: [2011-04-13 Wed 12:38]
+  #+BEGIN_SRC R :noweb yes :tangle test-inheritance.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    <<preamble>>
+    
+    ir <- setRefClass('jobjInterfaceRef', contains='jobjRef')
+    
+    ir$new(jobj=.External('RcreateObject', 'java/lang/Object', PACKAGE='rJava'),
+           jclass='java/lang/Object')
+    
+  #+END_SRC
+* DONE R package
+  CLOSED: [2011-04-11 Mon 05:50]
+  - CLOSING NOTE [2011-04-11 Mon 05:51] \\
+    used =helloJavaWorld= as prototype; abusing the top-level =src=
+    directory for Java: questionable? also, we're generating rJava.jar
+    during installation, whereas =helloJavaWorld= and co. just check
+    in the binary jars.
+  this seems vaguely relevant, but i'm not sure how (from [[http.://cran.r-project.org/doc/manuals/R-exts.pdf][R-exts.pdf]]):
+
+  #+BEGIN_QUOTE
+  In some rare circumstances, the configuration and cleanup scripts
+  need to know the location into which the package is being
+  installed. An example of this is a package that uses C code and
+  creates two shared object/DLLs. Usually, the object that is
+  dynamically loaded by R is linked against the second, dependent,
+  object. On some systems, we can add the location of this dependent
+  object to the object that is dynamically loaded by R. This means
+  that each user does not have to set the value of the
+  =LD_LIBRARY_PATH= (or equivalent) environment variable, but that the
+  secondary object is automatically resolved. Another example is when
+  a package installs support files that are required at run time, and
+  their location is substituted into an R data structure at
+  installation time. (This happens with the Java Archive files in the
+  SJava package.) The names of the top-level library directory (i.e.,
+  specifiable via the =‘-l’= argument) and the directory of the
+  package itself are made available to the installation scripts via
+  the two shell/environment variables =R_LIBRARY_DIR= and
+  =R_PACKAGE_DIR=. Additionally, the name of the package
+  (e.g. =‘survival’= or =‘MASS’=) being installed is available from
+  the environment variable =R_PACKAGE_NAME=. (Currently the value of
+  =R_PACKAGE_DIR= is always =${R_LIBRARY_DIR}/${R_ PACKAGE_NAME}=, but
+  this used not to be the case when versioned installs were
+  allowed. Its main use is in =‘configure.win’= scripts for the
+  installation path of external software’s DLLs.)
+  #+END_QUOTE
+ 
+  we're going to have to do a =configure.ac=, which does
+  =AC_SUBST(...)= and =AC_CONFIG_FILES([...R])= to formalize
+  =CLASSPATH=, =JAVA_LIBRARY_PATH=; as well as some kind of shell
+  script to invoke =R= properly, which formalizes =LD_LIBRARY_PATH=.
+
+  we're going to have to abuse =src= to build =RInterfaceProxy.jar=;
+  let's do it over =Makefile=, possibly via =configure.ac= (and not,
+  say, =ant=).
+
+* DONE pass values to interface-methods
+  CLOSED: [2011-04-04 Mon 03:30]
+  - CLOSING NOTE [2011-04-04 Mon 03:30] \\
+    works for some native types; not yet, however, for arbitrary classes.
+  there are some mixups, somehow, while translating between Java and
+  R.
+* DONE return values from invocation-handler
+  CLOSED: [2011-03-30 Wed 06:10]
+  - CLOSING NOTE [2011-03-30 Wed 06:10] \\
+    this doesn't work for the given example, of course, because the
+    interface-method returns =void=!
+* DONE register R-functions with a Java-proxy
+  CLOSED: [2011-03-30 Wed 05:42]
+  - CLOSING NOTE [2011-03-30 Wed 05:43] \\
+    couple weirdnesses: can't preserve =REXPReferences= via =toJava= in
+    named lists (though converting to vectors over =.jarray=); resorted,
+    therefore, to a =HashMap=.
+    
+    also, can't return anything but =null= from the =InvocationHandler=.
+  #+BEGIN_SRC R :tangle test-mogrifier.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    library(rJava)
+    .jinit(classpath=Sys.getenv('CLASSPATH'),
+           parameters=sprintf('-Djava.library.path=%s',
+             Sys.getenv('JAVA_LIBRARY_PATH')))
+    .jengine(TRUE)
+    
+    merge.lists <- function(...) {
+      list = do.call(c, list(...))
+      list[unique(names(do.call(c, list)))]
+    }
+    
+    to.hashmap <- function(implementations) {
+      hashmap <- new(J('java.util.HashMap'))
+    
+      ## Some things that Java expects of Objects.
+      default.implementations <- list(toString=function()
+                                      "RInterfaceProxy")
+    
+      implementations <-
+        merge.lists(implementations,
+                    default.implementations)
+      
+      ## Really need a Foreach here, since we're not using the return
+      ## value.
+      Map(function(name, implementation)
+          hashmap$put(name, toJava(implementation)),
+          names(implementations),
+          implementations)
+      hashmap
+    }
+    
+    proxy <- new(J('RInterfaceProxy'),
+      'Mogrifier',
+      to.hashmap(list(mogrify=function(string)
+                      paste(string, 'mogrified', sep='-'),
+                      tetradicSum=function(w, x, y, z)
+                      sum(w, x, y, z),
+                      multiplyInts=function(x, y)
+                      as.integer(x * y))))
+    
+    mogrifier <- proxy$newInstance()
+    
+    stopifnot(mogrifier$mogrify('totally') == 'totally-mogrified')
+    
+    stopifnot(mogrifier$tetradicSum(1, 2, 3, 4) == 10)
+    
+    stopifnot(mogrifier$multiplyInts(as.integer(2), as.integer(4)) == 8)
+    
+  #+END_SRC
+
+  #+BEGIN_SRC java :tangle RInterfaceProxy.java
+    import java.lang.reflect.InvocationHandler;
+    import java.lang.reflect.Method;
+    import java.lang.reflect.Proxy;
+    import java.util.ArrayList;
+    import java.util.HashMap;
+    import java.util.Map;
+    import java.util.Set;
+    
+    import org.rosuda.REngine.RList;
+    import org.rosuda.REngine.REngine;
+    import org.rosuda.REngine.REXP;
+    import org.rosuda.REngine.REXPDouble;
+    import org.rosuda.REngine.REXPInteger;
+    import org.rosuda.REngine.REXPFactor;
+    import org.rosuda.REngine.REXPLanguage;
+    import org.rosuda.REngine.REXPList;
+    import org.rosuda.REngine.REXPRaw;
+    import org.rosuda.REngine.REXPReference;
+    import org.rosuda.REngine.REXPString;
+    import org.rosuda.REngine.REXPWrapper;
+    import org.rosuda.REngine.JRI.JRIEngine;
+    
+    public class RInterfaceProxy {
+        String interfaceName;
+        HashMap<String, REXPReference> implementations;
+        InvocationHandler handler;
+        static HashMap<Class, Method> translations;
+    
+        public RInterfaceProxy(String interfaceName,
+                               HashMap<String, REXPReference> implementations) {
+            this.interfaceName = interfaceName;
+            this.implementations = implementations;
+            this.handler = makeInvocationHandler();
+        }
+    
+        static {
+            try {
+                translations =
+                    new HashMap<Class, Method>() {
+                    {
+                        put(REXPString.class,
+                            REXPString.class.getMethod("asString"));
+                        put(REXPRaw.class,
+                            REXPRaw.class.getMethod("asBytes"));
+                        put(REXPDouble.class,
+                            REXPDouble.class.getMethod("asDouble"));
+                        put(REXPFactor.class,
+                            REXPFactor.class.getMethod("asFactor"));
+                        put(REXPInteger.class,
+                            REXPInteger.class.getMethod("asInteger"));
+                        put(REXPList.class,
+                            REXPList.class.getMethod("asList"));                    
+                    }
+                };
+            } catch (Throwable e) {
+                e.printStackTrace();
+            }
+        }
+    
+        public InvocationHandler makeInvocationHandler() {
+            return new InvocationHandler() {
+                public Object invoke(Object proxy,
+                                     Method method,
+                                     final Object[] args) {
+                    try {
+                        final REXPReference implementation =
+                            RInterfaceProxy.this.implementations
+                            .get(method.getName());
+                        ArrayList<REXP> call = new ArrayList<REXP>() {
+                            {
+                                add(implementation);
+                                for (Object arg: args) {
+                                    add(REXPWrapper.wrap(arg));
+                                }
+                            }
+                        };
+                        REXP value = implementation.getEngine()
+                            .eval(new REXPLanguage
+                                  (new RList (call.toArray(new REXP[0]))),
+                                null,
+                                true);
+                        // NB: need to handle the case where get returns
+                        // null.
+                        return RInterfaceProxy.translations
+                            .get(value.getClass()).invoke(value);
+                    } catch (Throwable e) {
+                        e.printStackTrace();
+                    }
+                    return null;
+                }
+            };
+        }
+    
+        public Object newInstance() {
+            try {
+                Class interfaceClass = Class.forName(interfaceName);
+                return Proxy.newProxyInstance(interfaceClass.getClassLoader(),
+                                              new Class[] { interfaceClass },
+                                              handler);
+            } catch (Throwable e) {
+                e.printStackTrace();
+            }
+    
+            return null;
+        }
+    }
+    
+  #+END_SRC
+
+  #+BEGIN_SRC java :tangle Mogrifier.java
+    import org.rosuda.REngine.REXP;
+    
+    public interface Mogrifier {
+        public String mogrify(String string);
+        public double tetradicSum(double w, double x, double y, double z);
+        public int multiplyInts(int x, int y);
+    }
+    
+  #+END_SRC
+* DONE calling a java function (given a class) from within rJava
+  CLOSED: [2011-03-30 Wed 02:32]
+  - CLOSING NOTE [2011-03-30 Wed 02:33] \\
+    requires, however, a non-trivial environment (see [[./Makefile][Makefile]]).
+  #+BEGIN_SRC java :tangle TrivialFunction.java
+    public class TrivialFunction {
+        public void trivialFunction() {
+            System.out.println("hello, pseudo-trivial world!");
+        }
+    }
+    
+  #+END_SRC
+
+  #+BEGIN_SRC R :tangle test-java-function.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    library(rJava)
+    .jinit(classpath=Sys.getenv('CLASSPATH'),
+           parameters=sprintf('-Djava.library.path=%s',
+             Sys.getenv('JAVA_LIBRARY_PATH')))
+    tf = .jnew('TrivialFunction')
+    .jcall(tf, 'V', 'trivialFunction')
+    
+  #+END_SRC
+* DONE dispatch on proxy-method (Java) -> implementation-method (R) dictionary
+  CLOSED: [2011-03-30 Wed 05:43]
+  this will require a call from R to Java to the effect of: this named
+  list of procedures implements that interface.
+
+  see [[notes-2011-03-28][notes]].
+* DONE example of a proxy
+  CLOSED: [2011-03-28 Mon 09:40]
+  #+BEGIN_SRC java :tangle TestInterfaceProxy.java
+    import java.lang.StringBuilder;
+    import java.lang.reflect.InvocationHandler;
+    import java.lang.reflect.Method;
+    import java.lang.reflect.Proxy;
+    import java.util.Formatter;
+    
+    import org.rosuda.REngine.JRI.JRIEngine;
+    import org.rosuda.REngine.REngine;
+    import org.rosuda.REngine.REngineStdOutput;
+    
+    import org.apache.commons.lang3.RandomStringUtils;
+    
+    interface A {
+        String b(String c, String d);
+    }
+    
+    class TestInterfaceProxy {
+        static REngine re;
+    
+        public static void main(String[] argv) throws Throwable {
+            InvocationHandler handler = new InvocationHandler() {
+                    public Object invoke(Object proxy,
+                                         Method method,
+                                         Object[] args) {
+                        try {
+                            StringBuilder evalArgs = new StringBuilder();
+                            for (Object arg: args) {
+                                // http://stackoverflow.com/questions/41107/how-to-generate-a-random-alpha-numeric-string-in-java
+                                String identifier = RandomStringUtils.randomAlphabetic(32);
+                                // http://tolstoy.newcastle.edu.au/R/help/04/04/0847.html
+                                re.assign(identifier, (String) arg);
+                                evalArgs.append(identifier);
+                                evalArgs.append(",");
+                            };
+                            if (evalArgs.length() > 0)
+                                evalArgs.deleteCharAt(evalArgs.length() - 1);
+                            return re.parseAndEval(String.format("%s(%s)",
+                                                                 method.getName(),
+                                                                 evalArgs)).asString();
+                        } catch (Throwable e) {
+                            e.printStackTrace();
+                            // re.end();
+                        }
+                        System.out.println(method);
+                        return new Object();
+                    };
+                };
+            A a = (A) Proxy.newProxyInstance(A.class.getClassLoader(),
+                                             new Class[] { A.class },
+                                             handler);
+            
+            re = JRIEngine.createEngine(new String[] { "--vanilla", "--slave" },
+                                        new REngineStdOutput(),
+                                        false);
+    
+            re.parseAndEval("b <- function(c, d) paste(c, d)");
+     
+            assert a.b("hello", "world").equals("hello world");
+     
+            re.close();
+        }
+    }
+  #+END_SRC
+* CANCELED mutate initializer
+  CLOSED: [2011-05-23 Mon 17:07]
+  - CLOSING NOTE [2011-05-23 Mon 17:08] \\
+    Another approach, based on some whiteboarding with Michael: a custom
+    refClass containing proxy (in some sense, our initial solution).
+  #+BEGIN_QUOTE
+  On May 17, 2011, at 2:25 PM, Peter Danenberg wrote:
+
+  > I'm trying to instantiate a refClass containing jobjRef, but the
+  > object appears to be defective when `._jobjRef_dollar' is invoked:
+  > 
+  >> setRefClass('myjobjRef', contains='jobjRef')
+  >> 
+  >> new('myjobjRef',
+  >  +     jobj=.External('RcreateObject',
+  >  +       'java/lang/Object'),
+  >  +     jclass='java/lang/Object')$hashCode()
+  >  Error in .jcall("RJavaTools", "Z", "hasField", .jcast(x, "java/lang/Object"),  :
+  >    method hasField with signature (Ljava/lang/String;)Z not found                  
+  > 
+  > Do you have any idea what sort of initialization I'm missing?
+
+  The fact that you cannot subclass jobjRef. The problem is that for
+  performance reasons a lot of internal code uses inherits() to check
+  the class of the object which unfortunately doesn't take into
+  account S4 inheritance (partially it comes from times when jobjRef
+  was a S3 class). Hence as far as rJava is concerned, your object is
+  not a jobjRef so it falls through strange cracks.
+
+  Now, your particular case is easy to fix, it's just in .jcall()
+  which can easily use is() instead of inherits(), but in the C code
+  there is no easy way to check inheritance of S4 objects AFAIK, so I
+  fear it's unlikely to change soon (unless S4 gets more low-level
+  support in R).
+
+  I'm not sure what you're up to, especially since reference objects
+  and jobjRef are different implementations of the same concept, so
+  even if you could subclass jobjRef it would result in chaos, since
+  both classes are orthogonal yet use the same methods ($ in
+  particular).
+
+  Cheers,
+  Simon
+  #+END_QUOTE
+
+  #+BEGIN_QUOTE
+  On Tue, May 17, 2011 at 5:45 PM, Peter Danenberg <pcd@roxygen.org> wrote:                                                                                                                                           
+
+  > That's interesting; do you think that trick would allow Java to
+  > use the objects transparently?
+
+  Well yes, I think we should try it. His point about the $ causing
+  "chaos" is probably not a huge issue, since our reference class $
+  will provide the same methods that jobjRef provides. Just need to
+  trick his inherits() calls until they get fixed.
+
+  > This sounds like a bug in rjava to me. Anyway, how about hacking
+  > the class attribute to trick the inherits function? Like
+  > c("class", "jobjRef").  That has worked for me in the past.
+  #+END_QUOTE
+
+  #+BEGIN_SRC R :noweb yes :tangle mutate-initializer.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    <<preamble>>
+      
+    new('jobjRef',
+        jobj=.External('RcreateObject',
+          'java/lang/Object'),
+        jclass='java/lang/Object')$hashCode()
+    
+    setRefClass('myjobjRef', contains='jobjRef')
+    
+    new('myjobjRef',
+        jobj=.External('RcreateObject',
+          'java/lang/Object'),
+        jclass='java/lang/Object')$hashCode()
+    
+    ## mi <- setRefClass('mutateInitializer',
+    ##                   contains='jobjRef',
+    ##                   methods=list(initialize=function() {
+    ##                     callSuper()
+    ##                     .self
+    ##                   }),
+    ##                   representation(jobj="externalptr", jclass="character"), prototype=list(jobj=.jzeroRef, jclass="java/lang/Object"), where=environment())
+    ## mi$methods(initialize=function() {
+    ##   callSuper()
+    ##   .self
+    ## })
+    ## mi$new(jobj=.External('RcreateObject', 'java/lang/Object', PACKAGE='rJava'),
+    ##            jclass='java/lang/Object')
+    ## mi$new()
+    
+    ## ir <- setRefClass('jobjInterfaceRef', contains='jobjRef')
+    
+    ## ir$new(jobj=.External('RcreateObject', 'java/lang/Object', PACKAGE='rJava'),
+    ##        jclass='java/lang/Object')
+    
+  #+END_SRC
+
+  #+BEGIN_SRC R :noweb yes :tangle mutate-jobjref-initializer.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    <<preamble>>
+      
+    ## new('jobjRef',
+    ##     jobj=.External('RcreateObject',
+    ##       'RInterfaceProxy',
+    ##       'TestInterface',
+    ##       to.hashmap(list(mogrify=function(string)
+    ##                       paste(string, 'mogrified', sep='-'),
+    ##                       tetradicSum=function(w, x, y, z)
+    ##                       sum(w, x, y, z),
+    ##                       multiplyInts=function(x, y)
+    ##                       as.integer(x * y)))),
+    ##     jclass='RInterfaceProxy')$newInstance()$tetradicSum(1, 2, 3, 4)
+    
+    ## i <- setRefClass('myjobjRef',
+    ##             contains='jobjRef'## ,
+    ##             ## methods=list(initialize=function() {
+    ##             ##   callSuper()
+    ##             ##   .self
+    ##             ## })
+    ##             )
+    ## inew <- new('myjobjRef',
+    ##           jobj=.External('RcreateObject',
+    ##             'java/lang/Object',
+    ##             PACKAGE='rJava'),
+    ##           jclass='java/lang/Object')
+    ## inew$methods(harro=function() 2)
+    ## ._java_valid_object <- function(a) {
+    ##   if (is(a, "jobjRef")) a 
+    ##   else if (is.null(a)) .jnull() else {
+    ##     cm <- match(class(a)[1], names(.class.to.jclass))
+    ##     if (!any(is.na(cm))) { 
+    ##         if (length(a) == 1) { 
+    ##             y <- .jnew(.class.to.jclass[cm], a)
+    ##             if (.class.to.jclass[cm] %in% .primitive.classes) attr(y, "primitive") <- TRUE
+    ##             y 
+    ##         } else .jarray(a, dispatch = FALSE)
+    ##     } else {
+    ##       stop("Sorry, parameter type `", cm ,"' is ambiguous or not supported.")
+    ##     }
+    ##   }
+    ## }
+    ## ._java_valid_objects_list <- function( ... )
+    ##   lapply(list(...), ._java_valid_object )
+    ## ._java_class <- function( x ){
+    ##   if (is.jnull(x)) { if (is(x,"jobjRef")) .jfindClass(x@jclass) else .jclassObject } else {
+    ##     if (._isPrimitiveReference(x)) .jfield(x, "Ljava/lang/Class;", "TYPE") else .jcall(x, "Ljava/lang/Class;", "getClass")
+    ##   }
+    ## }
+    ## ._java_class_list <- function( objects_list )
+    ##     lapply(objects_list, ._java_class )
+    ## inew <- .jcall("RJavaTools", "Ljava/lang/Object;", 
+    ##     "newInstance", .jfindClass('java/lang/Object'), 
+    ##     .jarray(._java_valid_objects_list(NULL),"java/lang/Object", dispatch = FALSE ), 
+    ##     .jarray(._java_class_list(._java_valid_objects_list(NULL)),"java/lang/Class", dispatch = FALSE ), 
+    ##     evalString = FALSE, evalArray = FALSE, use.true.class = TRUE )
+    ## .jcall('RJavaTools', 'Z', 'hasField', inew, 'harro')
+    ## new(J('java.lang.Object'))$hashCode()
+    
+    ## i <- setRefClass('myjobjRef',
+    ##             contains='jobjRef'## ,
+    ##             ## methods=list(initialize=function() {
+    ##             ##   callSuper()
+    ##             ##   .self
+    ##             ## })
+    ##             )
+    ## ## i$new()$methods('initialize')
+    ## i$new(jobj=.External('RcreateObject', 'java/lang/Object', PACKAGE='rJava'),
+    ##       jclass='java/lang/Object')$harro()
+    
+    ## ir <- setRefClass('jobjInterfaceRef', contains='jobjRef')
+    
+    ## ir$new(jobj=.External('RcreateObject', 'java/lang/Object', PACKAGE='rJava'),
+    ##        jclass='java/lang/Object')$hashCode()
+    ## ir <- setRefClass('jobjInterfaceRef', contains='jobjRef')
+    
+    ## ir$new(jobj=.External('RcreateObject', 'java/lang/Object', PACKAGE='rJava'),
+    ##        jclass='java/lang/Object')$hashCode()
+    
+    ## .jcall("RJavaTools", "Ljava/lang/Object;", 
+    ##     "newInstance", .jfindClass('java/lang/Object'), 
+    ##     .jarray(NULL,"java/lang/Object", dispatch = FALSE ), 
+    ##     .jarray(NULL,"java/lang/Class", dispatch = FALSE ), 
+    ##     evalString = FALSE, evalArray = FALSE, use.true.class = TRUE )
+  #+END_SRC
+* CANCELED refclass with =bQuote=
+  CLOSED: [2011-05-10 Tue 20:52]
+  - CLOSING NOTE [2011-05-10 Tue 20:53] \\
+    Can't make bquote work with more complicated examples (e.g. nested
+    functions); falling back on ~substitute~.
+  #+BEGIN_SRC R :tangle refclass-with-bquote.R :shebang #!/usr/local/bin/R --vanilla --slave -f
+    make.ref.class <- function(a)
+      setRefClass('b',
+                  methods=list(initialize=eval(bquote(function() {
+                    print(.(a))
+                    .self
+                  }))));
+    
+    A <- make.ref.class(2)
+    a <- A$new()
+  #+END_SRC
+* CANCELED implementations as reference classes instead of lists
+  CLOSED: [2011-05-04 Wed 03:01]
+  - CLOSING NOTE [2011-05-04 Wed 03:01] \\
+    See [[setJavaInterfaceImplementation]].
+  from [[http://stat.ethz.ch/R-manual/R-devel/library/methods/html/refClass.html][refClass]]:
+
+  #+BEGIN_QUOTE
+  Fields may be modified in a method by using the non-local assignment
+  operator, =<<-=.
+
+  The call to setRefClass defines the specified class and returns a
+  “generator” object for that class.
+
+  - =$new(...)= :: This method is equivalent to the function new with
+                   the class name as an argument. The =...= arguments
+                   are values for the named fields. If the class has a
+                   method defined for =$initialize()=, this method
+                   will be called once the reference object has been
+                   created.
+                   
+                   The default method for =$initialize()= is
+                   equivalent to invoking the method
+                   =$initFields(...)= with named fields as its
+                   arguments.
+  #+END_QUOTE
+
+  see [[http://dirk.eddelbuettel.com/blog/2010/10/15/][dirk's blog]]:
+
+  #+BEGIN_QUOTE
+  new =Rcpp::Reference= class, that allows internal manipulation of R
+  2.12.0 reference classes. The class exposes a constructor that takes
+  the name of the target reference class and a field(string) method
+  that implements the proxy pattern to get/set reference fields using
+  callbacks to the R operators =$= and =$<-= in order to preserve the
+  R-level encapsulation.
+  #+END_QUOTE
+* Notes
+** Mon Mar 28 10:50:13 PDT 2011
+# <<notes-2011-03-28>>
+   we'll have the REXPs corresponding to closures; look at
+   =Rengine.Rengine= not =JRI.Rengine=; we'll have a list of REXPs.
+
+   register list of functions, state saved in InvocationHandler; give
+   as a return value IH; return an IH whose constructor takes the
+   dictionary; custom java code implementing IH; class generator in
+   reference class, wrapper around invocation handler.
+
+   implementInterface, pass dictionary: get constructor or
+   implementation handler; return the closure, if they call the
+   closure, they get an object; think about state at some point.
+
+   list of methods declared in the interface.
+** Mon Apr  4 10:22:25 PDT 2011
+   build our own JRI class with appropriate slots; create S4 objects:
+   special call in C.
+
+   wrap it in R package; test suite; reference class; nice interface.
+
+   generator object: setRefClass; initialize method on class; every
+   reference object reference to java object that underlies it;
+   initialize method: sets up reference; wrapper methods for each
+   method in interface; send to setRefClass; fields: active bindings;
+   setRefClass gives back class generator; use normal reference class
+   api to construct objects.
+
+   setRefClass for any interface, class; given a reference to a java
+   object; instantiate reference class, have underlying java
+   object. more general than implementing of interfaces; any interface
+   has an equivalent refClass.
+
+   don't have a named class yet; define a new interface: gives them
+   back a reference; interface has been pre-defined by java; maintain:
+   class-name map; interface implementation, gives them back reference
+   generator object; wrappers could be shared across class, interface;
+   difference is in initialize method;
+
+   related but orthogonal: wrapJavaClass, proxyJavaClass; for any
+   named class: can get a generator; call directly from R, not Java.
+
+   initialize function: does what that closure what do: calls the
+   proxy method; generalize it, though, so that we can proxy any java
+   class; .jnew on the named class; allowing it to take a function in
+   the constructor; what does the constructor do? sort of like the
+   initialize method: instance exists, initializes instance.
+
+   get a java object from initialize: pass to constructor/initializer;
+   override initialization: can take arguments, fields.
+
+   fancy: custom initializers.
+** Mon Apr 11 10:13:54 PDT 2011
+   implement not only interfaces but classes; worry about fields
+   later; methods wrappers for .jcall, etc.; initialize()
+   constructor. methods on the reference class just R functions
+   themselves?
+
+   right now: list, expect them to be called from java; instead of
+   calling java to call R; instead: use functions directly as methods;
+   for calling things from R, short circuit it by calling the
+   implementation methods directly; pass it directly to the
+   =setRefClass= call (=methods=); once it's =setRefClass=, semantics
+   are somewhat different (not necessarily drop-in); if implementing
+   java interface, want to use those features anyway; if something is
+   called from java, will it work if it uses these reference class
+   features; right enclosure; they parse methods with codetools; need
+   to make sure: same function; enclosing environment hasn't
+   changed. need to make sure that the function called from java is
+   the same function as called directly; people want the ability to be
+   able to say, this, self, and have things work correctly; if were
+   not doing this, self; pass methods into setRefClass and get
+   something corresponding to that function back out; own version of
+   the method enclosed in that instance environment;
+
+   when i implement this: closures? need some kind of mutable
+   state. how would that work with a single closure per class; static
+   state vs. class-level state; support instance-level state;
+
+   setRefClass: implement function? proxy refClass for classes *or*
+   interfaces; reference classes for extensions of java; c++:
+   extensions of c++ classes in R, c++ cannot see the R
+   implementations; what we'd like to do: at least at the interface
+   level, have java see the R implementation;
+
+   should they be writing code in the reference class style? (pretty
+   compatible with java, etc.)
+
+   discrete steps: 1. setRefClass, 2. implements interface; needs to
+   be able to get the methods enclosed in the instance; different set
+   of functions for every instance; create a new invocation handler
+   instance in initialize(); setJavaReferenceClass? given a java
+   class, create corresponding reference class; rcpp: allows them to
+   add on new methods; setRefClass call; that's where the
+   introspection comes in in initialization(); interfaces only
+   supported through java Proxy; currently only interfaces; later
+   class; give setJavaReferenceClass a list of character vectors
+   naming all the interfaces you want to implement; for now, single
+   interface; in the multiple interface case: methods() would be a
+   list of lists; conflicting method names in multiple interface
+   implementation; setJavaReferenceClass is a wrapper around
+   setRefClass: given name of java class or opaque class object,
+   introspect it, come up with a bunch of stubs that delegate up
+   through the rjava interface; setJavaImplementation; if the class
+   doesn't exist yet; if we want it to mimic java, how far do you go?;
+   at least need to represent all the parent classes of a given
+   object; represent e.g. java.lang.Object as reference class when
+   reference-classing java.lang.reflect.Proxy;
+
+   just make it work with the interfaces we've implemented? rJava
+   already similar to reference classes ($, etc.): what is the
+   advantages to these proxies? rcpp, same playing field, etc.;
+   correct about it: lot of overhead; trying to mimic rcpp, write cpp
+   in package, want to be able to call them from R via reference
+   classes; qt cpp stuff released in about a month through
+   bioconductor; not much point to a reference class if not
+   bidirectional; decide to what extent we're going to do the mapping;
+   introspecting entire class hierarchy not practical;
+
+   reference class stuff for this interface stuff;
+   setJavaInterfaceImplementation: name of interface, list of methods
+   (weren't going to do short-circuiting);
+
+   setJavaInterfaceImplementation: name, list of methods; from name,
+   look up ref class; inherit from that class; for implementations:
+   pass to java, inherited proxy methods, into location handler; other
+   way: short circuit; override methods with our implementations; call
+   these things directly from within R; during initialize methods, go
+   in get methods out, pass them on to invocation handler; setJII:
+   calls setRefClass, initialize(): get the methods out of the
+   instance, take them and pass them to the constructor of the proxy;
+   make it so that we can get from reference class object the
+   corresponding java object (jObjRef); every one of these guys should
+   inherit from some base references class that has a method to access
+   the jObjRef; somehow access generator object; test: short-circuited
+   call from within R, long route through java; translate between two
+   representations; 
+
+   all of our reference classes inherit from jObjRef; has the
+   necessary slots; pass that as any java interface transparently;
+   reference class inherit from S4; 
+** Wed Apr 13 14:09:14 PDT 2011
+   =initialize()= calls constructor on java object; just copy the
+   =jobj= and the =jclass= slots.
+
+   =com.gene.bioinfo.R=
+
+   mimic what john did with Rcpp; 
+** Mon Apr 18 10:10:59 PDT 2011
+   every java interface or class: has a reference class version of it;
+   signify instance, every java superclass; stub java implementations
+   that merely call the java methods, except where overridden;
+   contains: names of classes; all the parent-implementing R classes
+   as a flat list in the ;
+
+   contains: all the interfaces that it implements and its parent
+   implementations; trace the interfaces up to parentlessness;
+
+   fields support active bindings; construct an active binding;
+   substitute on the body; jobjRef, subinterface, multiple interface.
+
+# <<substitute>>
+   substitute outside the function definition.
+** Wed Apr 20 13:08:00 PDT 2011
+# <<simons-letter>>
+   got this letter from simon:
+
+   #+BEGIN_EXAMPLE
+   Subject: Re: Accessing the robjRefs that underlie REXPS4/REXPReferences
+   From: Simon Urbanek
+   Date: Tue, 19 Apr 2011 23:09:52 -0400
+   Cc: Michael Lawrence, Nicholas Lewin-Koh
+   To: Peter Danenberg
+
+   > If we have to modify rJava at the JNI level in order to retrieve
+   > objects not supported by e.g. REXPWrapper, do you mind giving us
+   > a hint?
+
+   You don't need to modify anything at JNI level because it's all
+   there ;). I was very busy in the last weeks and it was not trivial
+   to figure out what you're actually up to so I didn't get to it (all
+   you really wanted is Java reference support in resolveObject()).
+
+   Short story: get the most recent rJava and this will work: Object
+   foo = value.getObject();
+
+   The long story is that rni.rniXrefToJava() is what you wanted to
+   use, but since EXTPTRSXP was not supported in the resolution
+   (leading to null result and thus no attribute) you could not do it
+   on the resolved object. For now I have added a static support for
+   jobjRef objects in JRIEngine.resolvePointer() so they get converted
+   into REXPJavaReference. In the long run I'm envisioning a registry
+   of R classes so you can register a convertor that will get the
+   resolved REXP, the pointer and the engine so it can fill any
+   missing holes - and that could be used by packages as well.
+
+   Cheers,
+   Simon
+
+   > getAttribute("jobj") comes up null, unfortunately, on REXPS4s.
+   #+END_EXAMPLE
+
+   ascend the interface hierarchy to determine whether the
+   implementation is complete; these things virtual, no one
+   instantiate directly. error if it hasn't been implemented.
+   
+   problem is more general: have to provide implementation for every
+   method; implement an interface, has to extend, at least,
+   ~java.lang.object~;
+
+   dummy object; fake the inheritance from ~java.lang.Object~;
+   ~finalize~: free some SEXPs? (two garbage collectors); ~getClass~:
+   return ~java.lang.Object~; ~clone~: how to clone state?; ~notify~,
+   ~wait~: dummy object to keep track of that state; just clone the
+   pointer? copy the environment that stores the reference class;
+   reference to other environments, etc. that aren't copy; forward the
+   clone call onto the reference class object; shallow copy; java, by
+   default, does a shallow copy on the fields; expect the user to
+   override ~clone~ if they need a deep copy of the environment.
+
+   dummy object to handle signaling; 1) simon's new code; 2)
+   object; 3) reference class stuff.
+
+   subclassing difficult: can't extend a class; can only implement
+   interfaces; but try to support defining proxies of java classes as
+   reference classes; now integrated with S4 dispatch; whereas before,
+   attach to =jobjRef=; like Rcpp with a limited subset of
+   bidirectionality: interfaces.
+** Mon Apr 25 10:10:01 PDT 2011
+   functions modified and closed so that refclass methods see this and
+   super; ~.self~ and ~callSuper~ cease to exist; because we call the
+   function directly; call it through the reference class; create the
+   new object, instantiate the reference class; construct instance
+   first; get ~.self~ and ~callSuper~ out of the initialize
+   environment; rather than get from the implementation, just get from
+   the environment; print out what the enclosing environment during
+   and after initialization; slightly promiscuous: call it from java
+   on the reference class, as opposed to the naked methods; 
+** Wed May  4 14:03:29 PDT 2011
+   bioconductor conference; poster-worthy stuff; get the
+   proxy-object-class working; integrated into a nice package; IGB by
+   the end of the month.
+** Wed May 11 14:13:54 PDT 2011
+   arguments to generator object 2 passed on to the generator object
+   in ~setJavaInterfaceImplementation~; making ~where~ customizable;
+   ~setRefClass~: mangle the class name with implementation; do want
+   to get a class object back from ~setJavaInterfaceImplementation~;
+   mutate the implementing class? ~$methods(...)~ is sim
+
+   want to be able to pass the thing to Java (thus contains ~jobjRef~
+   or allows the ~jobjRef~ to be extracted); embed java instance in
+   there;
+
+   wrap the original initialize, delegate to it; pass on the
+   arguments; don't have to define a new class;
+   ~setJavaInterfaceImplementation~ rewrites ~initialize~; mutates;
+   doesn't have to pass back; ideally, so that the implementation
+   class can extend ~jobjRef~: when they define their implementation
+   class, they would have to ~contains=jobjRef~; we should check for
+   it; pass it to ~rJava~ function; have to deal with it from the Java
+   side as a ~REXPReference~; is this S4 as opposed to environment? S4
+   slot as attribute for pointer; pass to a method, shouldn't know the
+   difference; take the object returned from the ~RInterfaceProxy~,
+   copy those slots into the reference class instance.
+** Mon May 23 13:44:40 PDT 2011
+   setJavaRefClass (proxy methods up through object; . . .),
+   setJavaInterfaceImplementation: pass it methods; redefine
+   initialize;
+
+   subclass: can just setRefClass; override only seen in R.
+
+   setJavaImplementation . . .
+
+   is there a ref class existing; and, if not, instantiate the parent.
+
+   setJII as a wrapper around setRefClass (with methods, fields, etc.)
+   calling setJavaRefClass. Common refClass as parent (equivalent to
+   jobjRef) which references the proxy (as a field).
+
+   setJII(impl, extends, [implemented interfaces])
+
+   ~extends~ results in infinite regress?
+
+   setJII wrapper around setRefClass (gains: implements(result of
+   setJavaRefClass)); get name of class.
+
+   shouldn't do callSuper, etc. some whiteboard-pseudo:
+
+   #+BEGIN_SRC org
+     ,- javaObject -> ref (jobjRef)
+     
+     ,- setJavaRefClass(javaClass [e.g. 'java.io.File'])
+     ,  - setJavaRefClass(getSuperClass(javaClass))
+     ,  - makeWrappers(localMethods)
+     ,  - setRefClass(...)
+     
+     ,- impl <- setRefClass(...) [deprecated]
+     
+     ,- setJavaImpl(implements, ...) [wrapper around setRefClass, basically,
+     ,  replete with `methods', `fields', etc.; whith the addition of
+     ,  `implements'.]
+     ,  - setRefClass(..., contains=implements)
+     
+     ,- [not sure what this refers to, frankly: the wrapping that
+     ,  setJavaRefClass does; or is it defunct?]
+     ,- addTrack = function(track)
+     ,  - .jcall(.self@proxy, 'addTrack', track@proxy)
+   #+END_SRC
+** Tue May 24 15:31:31 PDT 2011
+   When extends: need to override methods; "stop, not implemented."
+
+   Call a method on an instance without the dynamic lookup;
+   short-circuit the lookup up of overridden object. JNI level:
+   pointer to code and call it?
+
+   If it did get to the invocation handler, might be able to hack
+   it. Bytecode compilation.
+
+   R implementations of java.lang.Object.
+
+   Pure R implementations.
+
+   Delegate.
+
+   implements: list of strings or generator objects corresponding to
+   to-be-implemented Java interface.
+
+   Through setRefClass, name of the implementing refClass is
+   defined. ref no longer points to the delegate object, but the
+   proxy.
+** Wed Jun 15 16:07:14 CDT 2011
+   cycle: java has a reference to R has one to java.
+
+   create a reference object proxy for jobjRef; break the memory cycle
+
+   cycle, never be garbage collected;
+
+   undeletable until passed to IGB;
+
+   invocationHandler only thing that keeps a reference to
+   referenceClass object (user never interacts with it); new
+   referenceClass wrapper around the jobjRef; some mode in which we
+   have a reference and inject it into referenceClass object.
+
+   java has references to methods in R; in R, we have a reference to
+   the java instance.
+
+   no, doesn't break the cycle.
+
+   object doesn't need to be part of a reference cl...
+
+   go back to list of methods; referenceClass object cannot have a
+   reference to itself (i.e. the ref field).
+
+   ref doesn't have to inherit from java superclass; doesn't need a
+   reference to its java self.
+
+   class that return from setJI, normal wrapper: equivalent of
+   setJavaRefClass; initialize method will call java.lang.Proxy, key
+   is: has to be a separate object.
+
+   thing that we pass into interfaceProxy: implementation never going
+   to be seen by R.
+
+   instead of passing .self in setJavaReferencClass, pass object that
+   has fields, methods, etc. other class sort of
+   setJavaReferenceClass, except replace init. initialize with other
+   object.
+
+   return value from setJavaReferenceClass; check the return value,
+   wrap it in setJavaRefClass.
+** Mon Jun 27 10:20:48 PDT 2011
+   Release in R, named object in Java; table of hash keys. Keep an
+   external pointer or the name of the object. Call it back into R.
+** Tue Jul 12 13:06:44 PDT 2011
+   data from R into IGB; or from IGB into R. useful: from R into
+   IGB. some familiarity with genomic ranges package. map genomic
+   ranges into IGB. where IGB asks for something element-wise, go into
+   R and pull it out.
+
+   batch query to R, hash it; don't want to copy all the data. pull
+   out some subset. don't want to depend on implementation in R level;
+   pull out reference to integer vector.
+
+   make it so it's more abstract: handle different implementations at
+   the R level; smart about pulling out blocks of data. IGB accessing
+   them sequentially (as opposed to random access).
+
+   pull out a vector of data from the R structure, keep it (e.g. Java
+   array); satisfy IGB's queries with that data structure.
+
+   caching on the Java side; initial prototype: make it
+   work. implement IGB data model with genomic ranges class.
+
+   IGB: sourceforge; email Lance and ask him to point me to the right
+   classes; JSM two weeks.
+
+   GRanges class (genomic ranges package) as opposed to the class
+   "genomic ranges" (base abstract class); get the data model
+   implemented, get into IGB as a loaded track; click, update view,
+   draw something; gene-model type of track; shows you where the genes
+   are (in IGB, a graph is a "quantitative track"; one extra column in
+   the GRanges (element metadata), IGB: univariate display (graphs
+   have only one Y variable: the score); single column within a given
+   GRanges object: treat that as score).
+
+   take whatever's in the example file in GRanges; see if we can
+   display it in IGB. (in the help for GRanges; three intervals.)
