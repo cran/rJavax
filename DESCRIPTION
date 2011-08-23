@@ -5,11 +5,11 @@ Title: rJava extensions
 Author: Peter Danenberg <pcd@roxygen.org>
 Description: Support for e.g. interfaces
 SystemRequirements: Java (>= 1.5)
-Version: 0.1
+Version: 0.2
 Depends: rJava
 Suggests: RUnit
 Collate: 'onLoad.R' 'ascend-class-hierarchy.R'
         'set-java-implementation.R'
-Packaged: 2011-08-08 18:07:27 UTC; pcdanenb
+Packaged: 2011-08-23 20:08:55 UTC; pcdanenb
 Repository: CRAN
-Date/Publication: 2011-08-08 18:38:23
+Date/Publication: 2011-08-24 04:11:23

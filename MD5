@@ -1,9 +1,10 @@
-b430e31d8d9139e5ba07010c63425d92 *DESCRIPTION
+d578412ba993481feda63a1424a9ad71 *DESCRIPTION
 74f7427cc074dcc724b38d6e4b9135d2 *NAMESPACE
 e1140c316913ac6deba256c462e37a3c *R/ascend-class-hierarchy.R
 4d3b7dfe6e3fcf48deffcd8c84017711 *R/onLoad.R
 c8a147f62f84e6806bae4a24d0de304c *R/set-java-implementation.R
 b60aa8b261cea4728d98d589c925e7b7 *TODO
+2fb7471dcfdd80278492f754f31c3898 *configure
 5c9c42f2bbf569d50539ab2f4d8b5078 *inst/java/JRI.jar
 cb9daf38388cc15c1c3d399dce6c1ee4 *inst/java/JRIEngine.jar
 05315be2f113a54fc7e3b0fea58d482a *inst/java/REngine.jar
@@ -13,7 +14,7 @@ cb9daf38388cc15c1c3d399dce6c1ee4 *inst/java/JRIEngine.jar
 acd2611f3fe95009a5cb25f884338e4e *man/setJavaImplementation.Rd
 e73454531419febd1af68affe4d1edaf *man/setJavaRefClass.Rd
 e0a1e9260df97cd772edaf7193160266 *preamble.R
-d8a11e41ca03d0b0fc7d9ce6c30d2f45 *src/Makefile
+3c5f67b2b671a6d54ab934590c487302 *src/Makefile
 68eaa0adff1eda6322d37f76f90fa0cf *src/RInterfaceProxy.java
 440e4822d1a2e2966462c43fbb62de20 *tests/Makefile
 16990b1781b1b7c38b37530140f57b1a *tests/TestInterface.java
