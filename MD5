@@ -1,8 +1,8 @@
-d578412ba993481feda63a1424a9ad71 *DESCRIPTION
+1eceb059fa132409d968a343589600b2 *DESCRIPTION
 74f7427cc074dcc724b38d6e4b9135d2 *NAMESPACE
 e1140c316913ac6deba256c462e37a3c *R/ascend-class-hierarchy.R
 4d3b7dfe6e3fcf48deffcd8c84017711 *R/onLoad.R
-c8a147f62f84e6806bae4a24d0de304c *R/set-java-implementation.R
+05fd1c4cd28183c4aa1ea5c8d1d3191a *R/set-java-implementation.R
 b60aa8b261cea4728d98d589c925e7b7 *TODO
 2fb7471dcfdd80278492f754f31c3898 *configure
 5c9c42f2bbf569d50539ab2f4d8b5078 *inst/java/JRI.jar
